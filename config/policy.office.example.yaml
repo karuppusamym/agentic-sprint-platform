@@ -1,0 +1,29 @@
+# Office profile: no model SDK or API key. Models are reached only through VS Code chat
+# (GitHub Copilot, optionally Claude) and Devin. Only the differences from the built-in
+# defaults are listed; see config/policy.yaml for every setting.
+# Use it with:  ASDP_POLICY_PATH=config/policy.office.example.yaml   (see .env.example)
+version: "1.0"
+jira:
+  source: cloud                # cloud (email + API token) | datacenter (personal access token) | mock
+  project: WF                  # your Jira project key
+  discovery_jql: 'project = WF AND sprint in openSprints() ORDER BY priority DESC'
+  eligible_statuses: ["In Progress"]
+  require_label: ai-ready
+  write_enabled: false         # read only until `doctor` is green; then true to post evidence
+generation:
+  provider: template           # the platform itself calls no model
+agents:
+  engines:
+    devin: true
+    copilot_vscode: true
+    claude_vscode: false       # true only if Claude Code is licensed and can sign in at the office
+  primary: devin
+  attended_engine: copilot_vscode
+  devin_api_enabled: false     # true once your Devin admin issues an API key (ASDP_DEVIN_API_KEY)
+  simulated_enabled: false
+  max_active_sessions: 2
+autopilot:
+  enabled: true
+  max_wip: 2
+team:
+  four_eyes: true

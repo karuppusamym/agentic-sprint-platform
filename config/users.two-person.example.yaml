@@ -1,0 +1,8 @@
+# Example team file for two people plus agents. Copy to config/users.yaml (dev auth mode).
+# Each person holds several roles. With team.four_eyes on, whoever approves a story's
+# spec and prototype cannot also sign its acceptance test, so each story still gets two people.
+users:
+  - {name: asha, display: "Asha (product + engineering lead)", roles: [product_owner, eng_lead, developer, qa]}
+  - {name: ben, display: "Ben (developer + QA + platform)", roles: [developer, qa, devops, security, eng_lead, product_owner]}
+  - {name: admin, display: "Admin", roles: [admin]}
+  - {name: svc-automation, display: "Automation service (CI)", roles: [automation], human: false}

@@ -1,0 +1,49 @@
+# Example GitHub Actions workflow. Copy to .github/workflows/ in each managed repository.
+#
+# Two ways to feed the portal, use either or both:
+#  1. Webhooks (no workflow changes): point a repository webhook at
+#     <portal>/api/v1/webhooks/github with events "Pull requests" and "Check runs", and name the
+#     jobs below to match ci.checks in config/policy.yaml (lint, unit, integration, security, staging-e2e).
+#  2. JUnit upload (below): posts test results so every acceptance criterion is matched to its tests.
+#
+# Branches created by the portal are named asdp/<JIRA-KEY>/<task>-a<attempt>.
+name: asdp
+on:
+  pull_request:
+    branches: [main]
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make lint
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make test-unit JUNIT=unit.xml
+      - name: Report criterion coverage to the portal
+        if: always() && startsWith(github.head_ref, 'asdp/')
+        env:
+          ASDP_URL: ${{ vars.ASDP_URL }}
+          ASDP_TOKEN: ${{ secrets.ASDP_TOKEN }}
+        run: |
+          KEY=$(echo "${{ github.head_ref }}" | cut -d/ -f2)
+          curl --fail-with-body -X POST "$ASDP_URL/api/v1/stories/$KEY/ci/junit?gate=G4&commit=${{ github.event.pull_request.head.sha }}&runUrl=${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            -H "Authorization: Bearer $ASDP_TOKEN" -H "Content-Type: application/xml" --data-binary @unit.xml
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make test-integration
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make security-scan
+  staging-e2e:
+    needs: [lint, unit, integration, security]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make deploy-staging && make test-e2e

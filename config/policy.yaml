@@ -1,0 +1,72 @@
+# Workflow policy (spec 15.1). Restart the API after editing.
+version: "1.0"
+jira:
+  source: mock                 # mock | cloud | datacenter  (keys go in .env; see docs/office-setup.md)
+  project: WF
+  discovery_jql: 'project = WF AND sprint in openSprints() ORDER BY priority DESC'
+  eligible_statuses: ["In Progress"]
+  require_label: ai-ready
+  reconcile_minutes: 5
+  auto_close: false            # Done always needs a named human
+  write_enabled: true          # set false for a real tenant until write-back is verified
+  done_transition: Done
+prototype:
+  auto_refinement_max_attempts: 3
+  require_human_approval: true
+  require_browser_pass: false  # needs a provisioned Playwright runner
+generation:
+  provider: template           # template | claude
+  # claude: Claude enriches the spec and writes the prototype; the deterministic checks still
+  # decide G1/G2, and failed rule ids are fed back on each bounded retry. Needs anthropic>=2.0
+  # and credentials (ANTHROPIC_API_KEY or `ant auth login`). Jira story text is sent to the
+  # Anthropic API, so confirm data classification first.
+  model: claude-opus-5-5
+  effort: high
+  max_output_tokens: 64000
+autopilot:
+  # What the platform does on its own between the three human decisions (approve, UAT, Done).
+  enabled: true
+  auto_analyze: true           # eligible stories are analyzed in priority order
+  auto_dispatch: true          # an approved, planned story is dispatched
+  auto_publish_evidence: true  # evidence is posted to Jira once UAT passes
+  max_wip: 4                   # stories in flight; keep it near what two people can review
+ci:
+  # GitHub check-run names that together establish each gate on the head commit.
+  checks:
+    G4: [lint, unit]
+    G5: [integration, security]
+    G6: [staging-e2e]
+team:
+  four_eyes: true              # whoever approves a baseline cannot also sign its acceptance test
+agents:
+  # Configure all three engines or just one. At least one must be true.
+  engines:
+    devin: true
+    copilot_vscode: true
+    claude_vscode: true
+  primary: devin               # autonomous multi-file work
+  attended_engine: claude_vscode   # attended fixes and rework in VS Code
+  devin_api_enabled: false     # true only after the tenant admin confirms API entitlement (+ ASDP_DEVIN_API_KEY)
+  devin_playbooks: {}          # playbook file id -> Devin playbook id, e.g. {implement-task: playbook-abc123}
+  copilot_sdk_enabled: false   # not implemented; needs enterprise authorization first
+  simulated_enabled: true      # LOCAL DEMO ONLY: lets you pick a labelled "simulated" engine per task
+  max_active_sessions: 2
+  enforce_path_ownership: true
+  per_run_timeout_minutes: 120
+  auto_repair_max_attempts: 3
+  path_ownership:
+    ui: apps/web/src
+    backend: services
+    data: database/migrations
+    contracts: packages/contracts
+    integration: tests/integration
+quality:
+  require: [G0, G1, G2, G3, G4, G5, G6, G7, G8]
+  require_approval_digest_match: true
+  require_criterion_tests: true   # JUnit G4 upload: every criterion needs a passing test named with its id
+cost:
+  max_per_story_usd: 60
+  max_per_run_usd: 20
+release:
+  production_human_approval: true
+  destructive_migration_human_approval: true
