@@ -162,10 +162,13 @@ class Settings(BaseModel):
     tenant_id: str = "default"
     auth_mode: str = "dev"  # dev | proxy
     dev_mode: bool = True
-    secret: str = "dev-only-change-me"
+    secret: str = "dev-only-change-me"  # see DEFAULT_SECRET
     inline_jobs: bool = False
     portal_origin: str = "http://localhost:5173"
     public_base_url: str = "http://localhost:8000"
+    proxy_secret: str = ""  # proxy auth: the SSO proxy sends it as X-Proxy-Secret so nothing else can pose as the proxy
+    max_body_bytes: int = 8_000_000
+    serve_portal: bool = False  # serve apps/portal/dist from the API (one origin, one container)
     webhook_secret: str = ""
     github_webhook_secret: str = ""
     automation_token: str = ""  # bearer token CI uses to report gates and JUnit
@@ -188,20 +191,44 @@ class Settings(BaseModel):
         s = cls()
         for field in cls.model_fields:
             v = e.get("ASDP_" + field.upper())
-            if v is None:
+            if not v:  # unset, or left blank in .env: keep the default
                 continue
             cur = getattr(s, field)
             if isinstance(cur, bool):
                 setattr(s, field, v.lower() in ("1", "true", "yes"))
+            elif isinstance(cur, int):
+                setattr(s, field, int(v))
             elif isinstance(cur, str):
                 setattr(s, field, v)
         for field in ("policy_path", "users_path"):  # relative paths are relative to the project root
             if not Path(getattr(s, field)).is_absolute():
                 setattr(s, field, str(ROOT / getattr(s, field)))
+        s.auth_mode = s.auth_mode.strip().lower()
+        if s.auth_mode not in ("dev", "proxy"):  # a typo must never fall back to header-trusting dev sign-in
+            raise ValueError(f"ASDP_AUTH_MODE must be 'dev' or 'proxy', not '{s.auth_mode}'")
         if Path(s.users_path).exists():  # optional team file; overrides the built-in dev users
             data = yaml.safe_load(Path(s.users_path).read_text(encoding="utf-8")) or {}
             s.users = [DevUser.model_validate(u) for u in data.get("users", [])] or s.users
         return s
+
+
+DEFAULT_SECRET = "dev-only-change-me"
+
+
+def production_problems(s: Settings) -> list[str]:
+    """Settings that make a shared (ASDP_DEV_MODE=false) deployment unsafe. The server refuses to
+    start while any of these is present."""
+    if s.dev_mode:
+        return []
+    out = []
+    if s.secret == DEFAULT_SECRET or len(s.secret) < 32:
+        out.append("ASDP_SECRET must be a random value of at least 32 characters (it signs prototype preview links).")
+    if s.auth_mode != "proxy":
+        out.append("ASDP_AUTH_MODE must be 'proxy': dev sign-in trusts whatever name the browser sends.")
+    elif len(s.proxy_secret) < 16:
+        out.append("ASDP_PROXY_SECRET must be set (16+ characters) and sent by the SSO proxy as X-Proxy-Secret, "
+                   "so a client that reaches the API directly cannot pose as the proxy.")
+    return out
 
 
 def load_env_file(path: str) -> list[str]:

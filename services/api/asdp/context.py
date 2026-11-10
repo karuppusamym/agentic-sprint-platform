@@ -25,7 +25,7 @@ class AppContext:
         url = self.settings.database_url
         kw: dict = {}
         if url.startswith("sqlite"):
-            kw["connect_args"] = {"check_same_thread": False}
+            kw["connect_args"] = {"check_same_thread": False, "timeout": 30}
             if ":memory:" in url:
                 kw["poolclass"] = StaticPool
         self.engine = create_engine(url, **kw)

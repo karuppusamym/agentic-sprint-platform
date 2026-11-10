@@ -18,7 +18,7 @@ from pathlib import Path
 
 import httpx
 
-from .config import Policy, Settings, load_policy
+from .config import Policy, Settings, load_policy, production_problems
 from .jira import JiraCloud, JiraDataCenter, JiraError
 
 OK, WARN, FAIL, SKIP = "OK", "WARN", "FAIL", "SKIP"
@@ -131,9 +131,11 @@ def doctor(settings: Settings, policy: Policy, offline: bool = False, jira_clien
         "ASDP_AUTOMATION_TOKEN is not set: CI cannot upload JUnit results.")
 
     # security posture
-    if settings.secret == "dev-only-change-me":
+    for problem in production_problems(settings):  # the server will not start with these
+        add("Production settings", FAIL, problem)
+    if settings.dev_mode and settings.secret == "dev-only-change-me":
         add("Signing secret", WARN, "ASDP_SECRET is the built-in default; set a long random value before sharing the portal.")
-    if settings.auth_mode == "dev":
+    if settings.dev_mode and settings.auth_mode == "dev":
         add("Sign-in", WARN, "auth_mode=dev trusts the X-User header. Fine on one machine; put it behind your SSO proxy "
                              "(ASDP_AUTH_MODE=proxy, ASDP_DEV_MODE=false) before others use it.")
     add("Team file", OK if Path(settings.users_path).exists() else WARN,

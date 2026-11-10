@@ -10,13 +10,13 @@ import {
 const PERM: Record<keyof AllowedActions, string> = {
   sync: 'story.sync', analyze: 'story.analyze', revise: 'story.revise', annotate: 'story.annotate', approve: 'story.approve',
   dispatch: 'story.dispatch', ingestCommit: 'commit.ingest', recordGate: 'gate.record', uat: 'story.uat', syncEvidence: 'evidence.sync',
-  transition: 'story.transition', pause: 'story.pause', resume: 'story.pause', cancel: 'story.pause', reportRun: 'run.report', cancelRun: 'run.cancel',
+  transition: 'story.transition', pause: 'story.pause', resume: 'story.pause', retry: 'story.analyze', cancel: 'story.pause', reportRun: 'run.report', cancelRun: 'run.cancel',
 };
 const WHEN: Partial<Record<keyof AllowedActions, string>> = {
   analyze: 'the story is ELIGIBLE', revise: 'a spec exists and the story is in review or later', annotate: 'a prototype exists',
   approve: 'the story is in HUMAN_REVIEW', dispatch: 'the plan is ready (PLAN_READY) or tasks are waiting',
   ingestCommit: 'approved work is under validation and has a head commit', recordGate: 'the story is in CI_VALIDATION or STAGING',
-  uat: 'the story is in UAT', syncEvidence: 'the story is in EVIDENCE_SYNC', transition: 'the story is DONE_ELIGIBLE', resume: 'the story is PAUSED',
+  uat: 'the story is in UAT', syncEvidence: 'the story is in EVIDENCE_SYNC', transition: 'the story is DONE_ELIGIBLE', resume: 'the story is PAUSED', retry: 'the story is FAILED',
   pause: 'the story is still in flight', cancel: 'the story is not finished',
 };
 
@@ -528,11 +528,12 @@ function ControlsPanel({ story }: { story: StoryDetail }) {
           </ActionButton>
         </div>
 
-        <h3>Pause / resume / cancel</h3>
+        <h3>Pause / resume / retry / cancel</h3>
         <Field label="Reason (optional)"><input value={reason} onChange={(e) => setReason(e.target.value)} /></Field>
         <div className="row wrap">
           <ActionButton {...gate('pause')} onAct={() => act(() => api.pause(key, reason), 'Story paused')}>Pause</ActionButton>
           <ActionButton {...gate('resume')} onAct={() => act(() => api.resume(key), (r) => `Resumed. State: ${r.state}`)}>Resume</ActionButton>
+          <ActionButton {...gate('retry')} onAct={() => act(() => api.retry(key), (r) => `Retried. State: ${r.state}`)}>Retry after failure</ActionButton>
           <ActionButton kind="danger" {...gate('cancel')} confirm={`Cancel ${key}? Active runs are cancelled and the story cannot be resumed.`}
                         onAct={() => act(() => api.cancel(key, reason), 'Story cancelled')}>Cancel story</ActionButton>
         </div>

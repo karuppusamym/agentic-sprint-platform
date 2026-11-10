@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import or_, select, text, update
 from sqlalchemy.orm import Session
 
 from .models import AuditEvent, Story
@@ -87,16 +87,23 @@ def require(actor: Actor, permission: str) -> None:
 
 def audit(db: Session, tenant_id: str, subject: str, event: str, actor: str, *, old: str = "", new: str = "",
           detail: dict | None = None, correlation_id: str = "") -> AuditEvent:
-    prev = db.execute(
-        select(AuditEvent.hash).where(AuditEvent.tenant_id == tenant_id).order_by(AuditEvent.id.desc()).limit(1)
-    ).scalar() or ""
+    # Two writers must never link to the same previous event. On PostgreSQL a transaction-scoped
+    # advisory lock serialises appenders; on SQLite the INSERT below takes the database write lock.
+    # Either way the chain head is read only after this transaction owns the right to append.
+    if db.get_bind().dialect.name == "postgresql":
+        db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": "asdp-audit:" + tenant_id})
     ts = utcnow()
+    row = AuditEvent(tenant_id=tenant_id, subject=subject, event=event, actor=actor, old_state=old, new_state=new,
+                     detail=detail or {}, correlation_id=correlation_id, timestamp=ts, prev_hash="", hash="")
+    db.add(row)
+    db.flush()
+    prev = db.execute(
+        select(AuditEvent.hash).where(AuditEvent.tenant_id == tenant_id, AuditEvent.id < row.id)
+        .order_by(AuditEvent.id.desc()).limit(1)
+    ).scalar() or ""
     body = {"subject": subject, "event": event, "actor": actor, "old": old, "new": new,
             "detail": detail or {}, "ts": ts.isoformat(), "prev": prev}
-    row = AuditEvent(tenant_id=tenant_id, subject=subject, event=event, actor=actor, old_state=old, new_state=new,
-                     detail=detail or {}, correlation_id=correlation_id, timestamp=ts, prev_hash=prev,
-                     hash=sha256_json(body))
-    db.add(row)
+    row.prev_hash, row.hash = prev, sha256_json(body)
     db.flush()
     return row
 

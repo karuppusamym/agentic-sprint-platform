@@ -1,7 +1,9 @@
 // Typed fetch client for the ASDP API. Shapes mirror services/api/asdp/main.py serializers.
 
+// Dev server: the API on localhost:8000. Production build: the same origin that serves the portal,
+// unless VITE_API_BASE names another one at build time.
 export const API_BASE: string =
-  ((import.meta.env.VITE_API_BASE as string | undefined) || 'http://localhost:8000').replace(/\/+$/, '');
+  ((import.meta.env.VITE_API_BASE as string | undefined) ?? (import.meta.env.PROD ? '' : 'http://localhost:8000')).replace(/\/+$/, '');
 const API = `${API_BASE}/api/v1`;
 const USER_KEY = 'asdp.user';
 
@@ -159,7 +161,7 @@ export interface AuditEvent {
 }
 export interface AllowedActions {
   sync: boolean; analyze: boolean; revise: boolean; annotate: boolean; approve: boolean; dispatch: boolean; ingestCommit: boolean;
-  recordGate: boolean; uat: boolean; syncEvidence: boolean; transition: boolean; pause: boolean; resume: boolean; cancel: boolean;
+  recordGate: boolean; uat: boolean; syncEvidence: boolean; transition: boolean; pause: boolean; resume: boolean; retry: boolean; cancel: boolean;
   reportRun: boolean; cancelRun: boolean;
 }
 export interface StoryDetail extends StorySummary {
@@ -250,6 +252,7 @@ export const api = {
   transition: (key: string) => post<{ state: string; jiraStatus: string }>(`${s(key)}/transition`),
   pause: (key: string, reason: string) => post<{ state: string }>(`${s(key)}/pause`, reason ? { reason } : {}),
   resume: (key: string) => post<{ state: string }>(`${s(key)}/resume`),
+  retry: (key: string) => post<{ state: string }>(`${s(key)}/retry`),
   cancel: (key: string, reason: string) => post<{ state: string }>(`${s(key)}/cancel`, reason ? { reason } : {}),
   runs: () => get<RunsView>('/runs'),
   attachRun: (id: number, url: string) => post<Run>(`/runs/${id}/attach`, { url }),

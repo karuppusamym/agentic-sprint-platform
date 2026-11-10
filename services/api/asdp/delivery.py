@@ -21,6 +21,7 @@ from .providers import AgentRunRequest, ProviderError
 
 ACTIVE_RUN = ("QUEUED", "AWAITING_MANUAL_LAUNCH", "RUNNING")
 OPEN_TASK = ("PENDING", "WAITING", "RUNNING")
+TRANSIENT_REFINEMENT = ("ANALYZING", "SPEC_DRAFT", "SPEC_CHECK", "PROTOTYPE_BUILD", "PROTOTYPE_TEST", "AUTO_REVISE")
 COMMIT_RE = re.compile(r"^([0-9a-f]{7,40}|sim-[0-9a-z-]{6,})$")
 
 
@@ -768,6 +769,13 @@ def reconcile(ctx: AppContext, db: Session) -> dict:
         audit(db, s.tenant_id, s.key, "LEASE_EXPIRED", "system", detail={"owner": s.lease_owner})
         s.lease_owner, s.lease_expiry = None, None
         out["leases_expired"] += 1
+    db.flush()
+    # A refinement job always holds the story lease. A story in a transient refinement state with
+    # no lease lost its job (the process restarted); fail it visibly so a person can retry.
+    for s in db.execute(select(Story).where(Story.state.in_(TRANSIENT_REFINEMENT), Story.lease_owner.is_(None))).scalars().all():
+        s.blocker = "The automated step was interrupted (the service restarted). Retry the story."
+        transition(db, s, "FAILED", "system", reason="orphaned refinement job")
+        out["orphans_failed"] = out.get("orphans_failed", 0) + 1
     schedule_all(ctx, db, "system")
     db.commit()
     return out

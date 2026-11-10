@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { NavLink, Route, Routes } from 'react-router-dom';
-import { API_BASE, api, errMsg, eventsUrl, getUser, setUser as persistUser } from './api';
+import { API_BASE, ApiError, api, errMsg, eventsUrl, getUser, setUser as persistUser } from './api';
 import type { AdminConfig, Me, User } from './api';
 import { AppCtx, useLive } from './components';
 import type { AppState } from './components';
@@ -31,7 +31,10 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    api.users().then(setUsers).catch((e) => setBootError(errMsg(e)));
+    // Behind SSO (proxy sign-in) there is no user list: the proxy decides who you are.
+    api.users().then(setUsers).catch((e) => {
+      if (!(e instanceof ApiError && e.status === 404)) setBootError(errMsg(e));
+    });
   }, []);
 
   // identity + config follow the selected user and every server event
@@ -71,7 +74,7 @@ export default function App() {
     const can = (p: string) => !!me?.permissions.includes(p);
     return {
       user, me, config, tick, toast, can,
-      needs: (p) => (can(p) ? '' : `Needs role: ${(config?.roles[p] ?? []).join(', ') || p}. You are ${user} (${me?.roles.join(', ') || '…'}).`),
+      needs: (p) => (can(p) ? '' : `Needs role: ${(config?.roles[p] ?? []).join(', ') || p}. You are ${me?.name ?? user} (${me?.roles.join(', ') || '…'}).`),
       act: async (fn, ok) => {
         try {
           const r = await fn();
@@ -104,6 +107,9 @@ export default function App() {
         <span className="small muted" title={`API: ${API_BASE}`}>
           Updates: {live ? 'live' : 'polling every 5 s'}
         </span>
+        {me?.authMode === 'proxy' ? (
+          <span className="small">Signed in as <strong>{me.name}</strong> ({me.roles.join(', ')})</span>
+        ) : (
         <label className="userpick">
           <span>Acting as</span>
           <select value={user} onChange={(e) => {
@@ -119,6 +125,7 @@ export default function App() {
             ))}
           </select>
         </label>
+        )}
       </header>
       {ws?.paused && (
         <div className="banner bad" role="status">

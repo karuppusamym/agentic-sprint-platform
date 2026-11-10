@@ -34,6 +34,11 @@ Portal: React + TypeScript + Vite (`apps/portal`). Policy: `config/policy.yaml`.
 5. No adapter may claim a session, test or integration that did not happen. Manual mode stays visibly manual.
 6. Every state change goes through `core.transition` so it is audited.
 
+## Production safety (do not weaken)
+- `config.production_problems` lists settings that block start-up when `ASDP_DEV_MODE=false`. Add to it; never bypass it.
+- `core.audit` inserts the event before reading the chain head so concurrent writers cannot fork the chain.
+- Every refinement job holds the story lease; `delivery.reconcile` fails stories left without one.
+
 ## Definition of done
 Tests added for new behaviour, `pytest` green, `npm run build` green, no secrets in code/logs, docs updated when
 behaviour or policy changes.

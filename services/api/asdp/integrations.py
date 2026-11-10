@@ -76,6 +76,9 @@ def _pull_request(ctx: AppContext, db: Session, p: dict) -> dict:
         return {"handled": False, "reason": f"pull_request.{action} is not used"}
     head = pr.get("head") or {}
     branch, sha, url = head.get("ref", ""), head.get("sha", ""), pr.get("html_url", "")
+    head_repo, base_repo = (head.get("repo") or {}).get("full_name"), ((pr.get("base") or {}).get("repo") or {}).get("full_name")
+    if head_repo and base_repo and head_repo != base_repo:  # anyone can fork and name a branch or title after a story
+        return {"handled": False, "reason": "pull requests from forks are not accepted as story work"}
     story = _story_for(db, ctx.settings.tenant_id, branch, pr.get("title", ""))
     if not story:
         return {"handled": False, "reason": "no story matches this branch or title"}

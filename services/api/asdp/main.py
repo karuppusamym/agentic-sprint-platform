@@ -5,18 +5,20 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 import threading
 import time
 from contextlib import asynccontextmanager
 
 from fastapi import Body, Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
-from sqlalchemy import select
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from . import autopilot, delivery, integrations, refine, sync
-from .config import ENGINES, validate_engines
+from .config import ENGINES, ROOT, production_problems, validate_engines
 from .context import AppContext
 from .core import (PERMISSIONS, POST_APPROVAL, SYSTEM, Actor, DomainError, audit, require, resume, transition, utcnow,
                    verify_audit_chain)
@@ -26,6 +28,9 @@ from .knowledge import load_playbooks, note_json, render_notes
 from .models import (CheckResult, KnowledgeNote, AgentRun, Annotation, Approval, Artifact, AuditEvent, FeatureSpec, JiraSync, PlanTask, Prototype,
                      SprintSnapshot, Story)
 from .specgen import diff_specs
+
+log = logging.getLogger("asdp")
+PORTAL_DIST = ROOT / "apps" / "portal" / "dist"
 
 PRIORITY = {"Highest": 0, "High": 1, "Medium": 2, "Low": 3, "Lowest": 4}
 STAGES = [("Intake", ["DISCOVERED", "ELIGIBLE", "NEEDS_REFINEMENT", "BLOCKED"]),
@@ -58,6 +63,19 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     app.add_middleware(CORSMiddleware, allow_origins=[ctx.settings.portal_origin], allow_methods=["*"],
                        allow_headers=["*"], allow_credentials=False)
 
+    @app.middleware("http")
+    async def _limit_body(request: Request, call_next):
+        size = request.headers.get("content-length", "")
+        if size.isdigit() and int(size) > ctx.settings.max_body_bytes:
+            return JSONResponse(status_code=413, content={"error": {
+                "code": "BODY_TOO_LARGE", "message": f"Request body is larger than {ctx.settings.max_body_bytes} bytes", "details": None}})
+        return await call_next(request)
+
+    def bounded(raw: bytes) -> bytes:  # bodies sent without a Content-Length
+        if len(raw) > ctx.settings.max_body_bytes:
+            raise DomainError(413, "BODY_TOO_LARGE", f"Request body is larger than {ctx.settings.max_body_bytes} bytes")
+        return raw
+
     @app.exception_handler(DomainError)
     async def _domain_error(request: Request, exc: DomainError):
         return JSONResponse(status_code=exc.status, content={"error": {"code": exc.code, "message": exc.message, "details": exc.details}})
@@ -76,11 +94,14 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         s = ctx.settings
         bearer = request.headers.get("authorization", "")
         if bearer.lower().startswith("bearer "):  # CI pipelines authenticate with the automation token
-            if s.automation_token and hmac.compare_digest(bearer[7:].strip(), s.automation_token):
+            if s.automation_token and hmac.compare_digest(bearer[7:].strip().encode(), s.automation_token.encode()):
                 return Actor(name="svc-automation", roles=["automation"], human=False)
-            raise DomainError(401, "UNAUTHENTICATED", "Invalid automation token")
+            if s.auth_mode != "proxy":  # an SSO proxy may forward the user's own bearer token; identity then comes from its headers
+                raise DomainError(401, "UNAUTHENTICATED", "Invalid automation token")
         if s.auth_mode == "proxy":
             # Behind an SSO reverse proxy that strips client-supplied identity headers.
+            if s.proxy_secret and not hmac.compare_digest(request.headers.get("x-proxy-secret", "").encode(), s.proxy_secret.encode()):
+                raise DomainError(401, "UNAUTHENTICATED", "This request did not come through the SSO proxy")
             name = request.headers.get("x-forwarded-user", "")
             roles = [r.strip() for r in request.headers.get("x-forwarded-groups", "").split(",") if r.strip() in PERMISSIONS["read"]]
             if not name or not roles:
@@ -100,13 +121,13 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 integrations.evaluate_checks(ctx, db, st)
         except Exception as e:
             db.rollback()
-            print(f"[asdp] check evaluation failed: {e}")
+            log.exception("check evaluation failed: %s", e)
         if ctx.policy.autopilot.enabled:
             try:
                 autopilot.tick(ctx, db)
             except Exception as e:  # never fail the user's request because a follow-up step failed
                 db.rollback()
-                print(f"[asdp] autopilot follow-up failed: {e}")
+                log.exception("autopilot follow-up failed: %s", e)
 
     def get_story(db: Session, key: str) -> Story:
         s = db.execute(select(Story).where(Story.tenant_id == ctx.settings.tenant_id, Story.key == key)).scalar()
@@ -161,6 +182,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             "transition": st == "DONE_ELIGIBLE" and can("story.transition"),
             "pause": st not in ("PAUSED", "DONE", "CANCELLED", "CARRYOVER") and can("story.pause"),
             "resume": st == "PAUSED" and can("story.pause"),
+            "retry": st == "FAILED" and can("story.analyze"),
             "cancel": st not in ("DONE", "CANCELLED") and can("story.pause"),
             "reportRun": can("run.report"), "cancelRun": can("run.cancel"),
         }
@@ -262,6 +284,17 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     @app.get("/healthz")
     def healthz():
         return {"ok": True}
+
+    @app.get("/readyz")
+    def readyz():
+        """Readiness: the database answers. Use /healthz for liveness."""
+        try:
+            with ctx.SessionLocal() as db:
+                db.execute(text("SELECT 1"))
+        except Exception as e:
+            log.error("readiness check failed: %s", e)
+            return JSONResponse(status_code=503, content={"ok": False, "database": "unreachable"})
+        return {"ok": True, "database": "ok"}
 
     @app.get(f"{api}/me")
     def me(actor: Actor = Depends(get_actor)):
@@ -479,6 +512,25 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         db.commit()
         return {"state": s.state}
 
+    @app.post(f"{api}/stories/{{key}}/retry")
+    def story_retry(key: str, db: Session = Depends(get_db), actor: Actor = Depends(get_actor)):
+        """A story whose automated step crashed (FAILED) goes back to the start of analysis. Nothing is
+        approved by this: a new spec and prototype version are produced and reviewed again."""
+        require(actor, "story.analyze")
+        s = get_story(db, key)
+        if s.state != "FAILED":
+            raise DomainError(409, "NOT_FAILED", f"{s.key} is {s.state}; only a FAILED story can be retried")
+        delivery.cancel_story_runs(ctx, db, s, actor.name, "Story retried after a failure")
+        s.blocker, s.lease_owner, s.lease_expiry = "", None, None
+        transition(db, s, "ELIGIBLE", actor.name, reason="retry after failure")
+        db.commit()
+        try:  # re-read Jira so eligibility reflects the issue as it is now
+            sync.sync_issue(ctx, db, key, actor)
+        except DomainError as e:
+            log.warning("retry of %s: Jira re-read failed: %s", key, e.message)
+        drive(db)
+        return {"state": get_story(db, key).state}
+
     @app.post(f"{api}/stories/{{key}}/cancel")
     def story_cancel(key: str, body: dict = Body(default={}), db: Session = Depends(get_db), actor: Actor = Depends(get_actor)):
         require(actor, "story.pause")
@@ -617,7 +669,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     # ------------------------------------------------------------ Git and CI
     @app.post(f"{api}/webhooks/github")
     async def github_webhook(request: Request):
-        raw = await request.body()
+        raw = bounded(await request.body())
         secret = ctx.settings.github_webhook_secret
         if not secret and not ctx.settings.dev_mode:
             raise DomainError(503, "WEBHOOK_NOT_CONFIGURED", "Set ASDP_GITHUB_WEBHOOK_SECRET to accept GitHub webhooks")
@@ -636,7 +688,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     @app.post(f"{api}/stories/{{key}}/ci/junit")
     async def story_junit(key: str, request: Request, commit: str, gate: str = "G4", runUrl: str = "",
                           actor: Actor = Depends(get_actor)):
-        raw = (await request.body()).decode("utf-8", errors="replace")
+        raw = bounded(await request.body()).decode("utf-8", errors="replace")
         with ctx.SessionLocal() as db:
             res = integrations.ingest_junit(ctx, db, get_story(db, key), actor, gate, commit, raw, runUrl)
             drive(db)
@@ -703,7 +755,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             last = after
             if not last:
                 with ctx.SessionLocal() as db:
-                    last = db.execute(select(AuditEvent.id).order_by(AuditEvent.id.desc()).limit(1)).scalar() or 0
+                    last = db.execute(select(AuditEvent.id).where(AuditEvent.tenant_id == ctx.settings.tenant_id)
+                                      .order_by(AuditEvent.id.desc()).limit(1)).scalar() or 0
             yield "retry: 3000\n\n"
             idle = 0
             while not await request.is_disconnected():
@@ -749,6 +802,20 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             mock.fail_after_write = int(body.get("failAfterWrite", 0))
             return {"failWrites": mock.fail_writes, "failAfterWrite": mock.fail_after_write}
 
+    # ------------------------------------------------------------ built portal (single-origin deployment)
+    if ctx.settings.serve_portal and (PORTAL_DIST / "index.html").is_file():
+        if (PORTAL_DIST / "assets").is_dir():
+            app.mount("/assets", StaticFiles(directory=PORTAL_DIST / "assets"), name="portal-assets")
+
+        @app.get("/{path:path}", include_in_schema=False)
+        def portal(path: str):
+            if path.startswith(("api/", "preview/")):
+                raise DomainError(404, "NOT_FOUND", "not found")
+            f = (PORTAL_DIST / path).resolve()
+            if path and f.is_file() and PORTAL_DIST.resolve() in f.parents:
+                return FileResponse(f)
+            return FileResponse(PORTAL_DIST / "index.html", headers={"Cache-Control": "no-cache"})
+
     return app
 
 
@@ -764,8 +831,18 @@ def _background(ctx: AppContext, stop: threading.Event) -> None:
                 delivery.reconcile(ctx, db)
                 autopilot.tick(ctx, db)
         except Exception as e:  # keep the loop alive; the next tick retries
-            print(f"[asdp] background tick failed: {e}")
+            log.exception("background tick failed: %s", e)
 
 
 def app_factory() -> FastAPI:
-    return create_app()
+    """Entry point for uvicorn. Refuses to start a shared deployment with unsafe settings."""
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    ctx = AppContext()
+    problems = production_problems(ctx.settings)
+    if problems:
+        raise SystemExit("ASDP will not start with ASDP_DEV_MODE=false until these are fixed:\n- " + "\n- ".join(problems))
+    if not ctx.settings.dev_mode and isinstance(ctx.jira, MockJira):
+        log.warning("jira.source is 'mock': the sprint shown is demo data, not your Jira. Set jira.source in the policy file.")
+    if ctx.settings.dev_mode:
+        log.warning("dev mode: sign-in trusts the X-User header and demo controls are on. Do not expose this to others.")
+    return create_app(ctx)

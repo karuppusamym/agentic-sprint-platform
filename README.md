@@ -114,6 +114,11 @@ acceptance criteria after approval.
 
 A gate whose binding changed shows as `STALE`. There is no aggregate score and no override.
 
+## Running it for the team
+With `ASDP_DEV_MODE=false` the server refuses to start until sign-in goes through your SSO proxy and
+the signing secrets are set. The settings, the proxy contract, the container image and the known
+limits are in [docs/production.md](docs/production.md).
+
 ## No model SDK or API key at the office
 
 The platform calls no model with `generation.provider: template`. Specs, prototypes and code are
